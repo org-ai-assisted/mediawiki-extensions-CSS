@@ -145,10 +145,13 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 				$headItem .= Html::linkedStyle( $url );
 			} else {
 				# Namespace not whitelisted: refuse delivery.
-				$headItem .= '<!-- Extension:CSS Error in ' . substr( $css, 0, 30 )
+				# Strip "--" runs so user-supplied content can't escape the
+				# HTML comment we're embedding it in.
+				$snippet = str_replace( '-', '', substr( $css, 0, 30 ) );
+				$headItem .= '<!-- Extension:CSS Error in ' . $snippet
 					. ( strlen( $css ) > 30 ? '...' : '' )
 					. '. Only namespaces [' . implode( ',', $whitelist ) . '] allowed.'
-					. ' You use: ' . $title->getNamespace() . ' (namespace id) -->';
+					. ' You use: ' . (int)$title->getNamespace() . ' (namespace id) -->';
 			}
 		} elseif ( $css[0] === '/' && !( strlen( $css ) >= 2 && $css[1] === '*' ) ) {
 			# Regular file
@@ -205,18 +208,25 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 	 * @return bool|void True or no return value to continue or false to abort
 	 */
 	public function onRawPageViewBeforeOutput( $rawPage, &$text ) {
-		# When CssRawWhitelistedNamespaceIds is configured (an array), the
-		# admin has explicitly opted into serving raw, unsanitized CSS from
-		# the whitelisted namespaces. Skip sanitization here. Which pages are
-		# allowed to be loaded as CSS is gated by cssRender(), not here.
-		if ( is_array( $this->config->get( 'CssRawWhitelistedNamespaceIds' ) ) ) {
+		$identifier = $this->config->get( 'CSSIdentifier' );
+
+		if ( !$rawPage->getRequest()->getBool( $identifier ) ) {
 			return;
 		}
 
-		$identifier = $this->config->get( 'CSSIdentifier' );
-
-		if ( $rawPage->getRequest()->getBool( $identifier ) ) {
-			$text = $this->sanitizeCSS( $text );
+		# Skip sanitization only when the requested page itself is in a
+		# whitelisted namespace. Checking is_array() alone would let any page
+		# on the wiki be served raw via a hand-crafted ?action=raw URL once
+		# the whitelist is configured.
+		$whitelist = $this->config->get( 'CssRawWhitelistedNamespaceIds' );
+		$title = $rawPage->getTitle();
+		if ( is_array( $whitelist )
+			&& $title
+			&& in_array( $title->getNamespace(), $whitelist, true )
+		) {
+			return;
 		}
+
+		$text = $this->sanitizeCSS( $text );
 	}
 }
