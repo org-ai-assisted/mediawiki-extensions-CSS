@@ -157,25 +157,35 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 			# Regular file
 			$base = $this->config->get( 'CSSPath' ) ??
 				$this->config->get( MainConfigNames::StylePath );
-			// The URL decoding and replacement for \ to / are to workaround a
-			// path traversal vulnerability (see T369486 and T401526).
-			// TODO: Implement a proper URL parser. There may be more niche URL
-			// shenanigans one could get up to that MediaWiki's parser does not
-			// handle, but which the browser does. The most surefire way to
-			// guarantee that no tomfoolery happens is to 100% replicate what
-			// the browser does and not only like 90% of it.
-			$path = str_ireplace( '%2f', '/', $css );
-			$path = str_ireplace( '%5c', '\\', $path );
-			$path = str_replace( '\\', '/', $path );
-			$url = wfAppendQuery( $base . $path, $rawProtection );
 
-			# Verify the expanded URL is still using the base URL
-			$expandedUrl = $this->urlUtils->expand( $url );
-			$expandedBase = $this->urlUtils->expand( $base );
-			if ( $expandedUrl && $expandedBase && strpos( $expandedUrl, $expandedBase ) === 0 ) {
-				$headItem .= Html::linkedStyle( $url );
-			} else {
+			# Defence-in-depth path validation.
+			#
+			# T369486 / T401526 patched the obvious cases (%2f, %5c, raw
+			# backslashes) by replacing those sequences before the
+			# urlUtils->expand() prefix check. That approach is brittle:
+			# it missed %2e (dot), %252e, NFKC/IDN look-alikes, and any
+			# future encoding the browser learns to decode. Rather than
+			# try to canonicalise the path (which requires replicating
+			# browser URL parsing exactly), restrict the input to a tight
+			# allowlist of characters that legitimate static-CSS paths
+			# need, and refuse "..". The expand()+str_starts_with() prefix
+			# check is kept as a second line of defence.
+			$isSafePath = preg_match( '#^/[A-Za-z0-9._/-]+$#', $css )
+				&& !str_contains( $css, '..' );
+
+			if ( !$isSafePath ) {
 				$headItem .= '<!-- Invalid/malicious path  -->';
+			} else {
+				$url = wfAppendQuery( $base . $css, $rawProtection );
+				$expandedUrl = $this->urlUtils->expand( $url );
+				$expandedBase = $this->urlUtils->expand( $base );
+				if ( $expandedUrl && $expandedBase
+					&& str_starts_with( $expandedUrl, $expandedBase )
+				) {
+					$headItem .= Html::linkedStyle( $url );
+				} else {
+					$headItem .= '<!-- Invalid/malicious path  -->';
+				}
 			}
 		} else {
 			# sanitized user CSS
