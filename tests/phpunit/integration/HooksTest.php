@@ -5,7 +5,10 @@ namespace MediaWiki\Extension\CSS\Tests\Integration;
 use MediaWiki\Extension\CSS\Hooks;
 use MediaWiki\Parser\Parser;
 use MediaWiki\Parser\ParserOutput;
+use MediaWiki\Request\WebRequest;
+use MediaWiki\Title\Title;
 use MediaWikiIntegrationTestCase;
+use RawAction;
 
 /**
  * @covers \MediaWiki\Extension\CSS\Hooks
@@ -132,5 +135,155 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 				EOT,
 			],
 		];
+	}
+
+	private function captureHeadItem( Hooks $hooks, string $css ): string {
+		$captured = '';
+		$parserOutput = $this->createMock( ParserOutput::class );
+		$parserOutput->expects( $this->once() )
+			->method( 'addHeadItem' )
+			->willReturnCallback( static function ( $headItem ) use ( &$captured ) {
+				$captured = $headItem;
+			} );
+		$parser = $this->createMock( Parser::class );
+		$parser->method( 'getOutput' )->willReturn( $parserOutput );
+		$result = $hooks->cssRender( $parser, $css );
+		$this->assertSame( '', $result );
+		return $captured;
+	}
+
+	public function testCssRenderArticleInWhitelistedNamespace() {
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+		$this->insertPage(
+			Title::makeTitle( NS_MEDIAWIKI, 'CssExtForkTest.css' ),
+			'.foo { color: red; }'
+		);
+
+		$head = $this->captureHeadItem( $this->newInstance(), 'MediaWiki:CssExtForkTest.css' );
+
+		$this->assertStringContainsString( '<!-- Begin Extension:CSS -->', $head );
+		$this->assertStringContainsString( '<link rel="stylesheet"', $head );
+		$this->assertStringContainsString( 'action=raw', $head );
+		$this->assertStringContainsString( 'css-extension=1', $head );
+		$this->assertStringContainsString( '<!-- End Extension:CSS -->', $head );
+	}
+
+	public function testCssRenderArticleInNonWhitelistedNamespaceRefuses() {
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+		$this->insertPage(
+			Title::makeTitle( NS_USER, 'CssExtForkTestUser/myskin.css' ),
+			'.foo { color: red; }'
+		);
+
+		$head = $this->captureHeadItem(
+			$this->newInstance(),
+			'User:CssExtForkTestUser/myskin.css'
+		);
+
+		$this->assertStringContainsString( 'Extension:CSS Error in', $head );
+		$this->assertStringContainsString( 'Only namespaces [' . NS_MEDIAWIKI . ']', $head );
+		$this->assertStringContainsString( 'You use: ' . NS_USER . ' (namespace id)', $head );
+		// Crucially: no <link> rendered for a non-whitelisted page.
+		$this->assertStringNotContainsString( '<link', $head );
+	}
+
+	public function testCssRenderEmbeddedSnippetStripsHyphensToBlockCommentEscape() {
+		// Page titles in MediaWiki cannot contain '>', so a literal "-->" run
+		// cannot reach this code path. The hyphen strip is belt-and-braces: it
+		// also flattens "--" runs that an attacker might combine with future
+		// parser quirks to escape the surrounding HTML comment.
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+		$this->insertPage(
+			Title::makeTitle( NS_USER, 'Foo--Bar.css' ),
+			'.foo { color: red; }'
+		);
+
+		$head = $this->captureHeadItem( $this->newInstance(), 'User:Foo--Bar.css' );
+
+		$this->assertStringContainsString( 'Error in User:FooBar.css', $head );
+		$this->assertStringNotContainsString( 'Foo--', $head );
+	}
+
+	public function testCssRenderNonExistentArticleFallsThroughToInlineSanitizer() {
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+
+		// 'MediaWiki:DefinitelyNotCreated.css' is a syntactically valid title
+		// that does not exist -> $title->exists() is false -> cssRender falls
+		// through to the inline-CSS branch -> sanitizer rejects the page name
+		// as malformed CSS.
+		$head = $this->captureHeadItem(
+			$this->newInstance(),
+			'MediaWiki:DefinitelyNotCreated.css'
+		);
+
+		$this->assertStringContainsString(
+			'/* css-sanitizer failed to parse CSS */',
+			$head
+		);
+		$this->assertStringNotContainsString( '<link', $head );
+	}
+
+	private function makeRawPage( int $namespace, bool $cssExtensionFlag ): RawAction {
+		$title = $this->createMock( Title::class );
+		$title->method( 'getNamespace' )->willReturn( $namespace );
+
+		$request = $this->createMock( WebRequest::class );
+		$request->method( 'getBool' )
+			->with( 'css-extension' )
+			->willReturn( $cssExtensionFlag );
+
+		$rawPage = $this->createMock( RawAction::class );
+		$rawPage->method( 'getTitle' )->willReturn( $title );
+		$rawPage->method( 'getRequest' )->willReturn( $request );
+		return $rawPage;
+	}
+
+	public function testRawPageViewBypassesSanitizationForWhitelistedNamespace() {
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+		$rawPage = $this->makeRawPage( NS_MEDIAWIKI, true );
+
+		$text = 'body { -evil-vendor: bad; }';
+		$original = $text;
+		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
+
+		// Admin opted in for MediaWiki: ns; content passes through untouched.
+		$this->assertSame( $original, $text );
+	}
+
+	public function testRawPageViewSanitizesNonWhitelistedNamespaceWhenWhitelistConfigured() {
+		// Regression cover for the gap closed in 54eb3ff: before that commit a
+		// configured whitelist disabled sanitization for ALL namespaces, so a
+		// User:Attacker/X page requested with ?action=raw&ctype=text/css&
+		// css-extension=1 was returned as-is. Must now sanitize.
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', [ NS_MEDIAWIKI ] );
+		$rawPage = $this->makeRawPage( NS_USER, true );
+
+		$text = '{not valid css}';
+		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
+
+		$this->assertSame( '/* css-sanitizer failed to parse CSS */', $text );
+	}
+
+	public function testRawPageViewSanitizesWhenWhitelistUnset() {
+		// Legacy behaviour: $wgCssRawWhitelistedNamespaceIds null -> sanitize
+		// every css-extension raw view regardless of namespace.
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', null );
+		$rawPage = $this->makeRawPage( NS_MEDIAWIKI, true );
+
+		$text = '{not valid css}';
+		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
+
+		$this->assertSame( '/* css-sanitizer failed to parse CSS */', $text );
+	}
+
+	public function testRawPageViewIsNoOpWithoutCssExtensionFlag() {
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', null );
+		$rawPage = $this->makeRawPage( NS_MEDIAWIKI, false );
+
+		$text = '{not valid css}';
+		$original = $text;
+		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
+
+		$this->assertSame( $original, $text );
 	}
 }
