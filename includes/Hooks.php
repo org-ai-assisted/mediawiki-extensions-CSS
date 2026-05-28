@@ -196,7 +196,11 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 			# strict CSPs; an inline <style> is what wiki templates that
 			# interpolate page variables (e.g. Template:Header's per-page
 			# site-notice hide rule) actually need.
-			$headItem .= Html::inlineStyle( $css, 'all', [ 'type' => 'text/css' ] );
+			#
+			# `type="text/css"` is HTML5-default and MediaWiki strips it
+			# from the <style> tag in 1.43+, so passing it as an attribute
+			# is a no-op and breaks tests that expect it on the wire.
+			$headItem .= Html::inlineStyle( $css );
 		}
 
 		$headItem .= '<!-- End Extension:CSS -->';

@@ -8,7 +8,6 @@ use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Request\WebRequest;
 use MediaWiki\Title\Title;
 use MediaWikiIntegrationTestCase;
-use RawAction;
 
 /**
  * @covers \MediaWiki\Extension\CSS\Hooks
@@ -105,13 +104,13 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 				'/skins/foo-bar.min.css',
 			],
 			[
-				'<!-- Begin Extension:CSS --><style type="text/css">' .
+				'<!-- Begin Extension:CSS --><style>' .
 				'/* css-sanitizer failed to parse CSS */</style>' .
 				'<!-- End Extension:CSS -->',
 				'{',
 			],
 			[
-				'<!-- Begin Extension:CSS --><style type="text/css">' .
+				'<!-- Begin Extension:CSS --><style>' .
 				'/* css-sanitizer failed to sanitize CSS */</style>' .
 				'<!-- End Extension:CSS -->',
 				<<<EOT
@@ -123,7 +122,7 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 				EOT,
 			],
 			[
-				'<!-- Begin Extension:CSS --><style type="text/css">' .
+				'<!-- Begin Extension:CSS --><style>' .
 				'body{background:yellow;font-size:20pt;color:red}</style>' .
 				'<!-- End Extension:CSS -->',
 				<<<EOT
@@ -223,7 +222,7 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 		$this->assertStringNotContainsString( '<link', $head );
 	}
 
-	private function makeRawPage( int $namespace, bool $cssExtensionFlag ): RawAction {
+	private function makeRawPage( int $namespace, bool $cssExtensionFlag ): object {
 		$title = $this->createMock( Title::class );
 		$title->method( 'getNamespace' )->willReturn( $namespace );
 
@@ -232,10 +231,25 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 			->with( 'css-extension' )
 			->willReturn( $cssExtensionFlag );
 
-		$rawPage = $this->createMock( RawAction::class );
-		$rawPage->method( 'getTitle' )->willReturn( $title );
-		$rawPage->method( 'getRequest' )->willReturn( $request );
-		return $rawPage;
+		// Anonymous stub: RawAction inherits Action::getTitle() which is
+		// `final`, so PHPUnit cannot double it via createMock(). The hook
+		// signature is untyped (`$rawPage`), so any object exposing
+		// getRequest() and getTitle() works.
+		return new class( $request, $title ) {
+			public function __construct(
+				private readonly WebRequest $request,
+				private readonly Title $title
+			) {
+			}
+
+			public function getRequest(): WebRequest {
+				return $this->request;
+			}
+
+			public function getTitle(): Title {
+				return $this->title;
+			}
+		};
 	}
 
 	public function testRawPageViewBypassesSanitizationForWhitelistedNamespace() {
@@ -261,7 +275,9 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 		$text = '{not valid css}';
 		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
 
-		$this->assertSame( '/* css-sanitizer failed to parse CSS */', $text );
+		// '{not valid css}' tokenises as a valid empty block prelude, so
+		// the parse step succeeds; the sanitizer rejects it instead.
+		$this->assertSame( '/* css-sanitizer failed to sanitize CSS */', $text );
 	}
 
 	public function testRawPageViewSanitizesWhenWhitelistUnset() {
@@ -273,7 +289,9 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 		$text = '{not valid css}';
 		$this->newInstance()->onRawPageViewBeforeOutput( $rawPage, $text );
 
-		$this->assertSame( '/* css-sanitizer failed to parse CSS */', $text );
+		// '{not valid css}' tokenises as a valid empty block prelude, so
+		// the parse step succeeds; the sanitizer rejects it instead.
+		$this->assertSame( '/* css-sanitizer failed to sanitize CSS */', $text );
 	}
 
 	public function testRawPageViewIsNoOpWithoutCssExtensionFlag() {
