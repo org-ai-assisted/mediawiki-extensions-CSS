@@ -86,6 +86,64 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 	}
 
 	/**
+	 * Maximum nesting depth of CSS functions ('(' opens) accepted by
+	 * sanitizeCSS(). The wikimedia/css-sanitizer property-value matcher
+	 * is super-exponential in the depth of nested math functions
+	 * (calc/min/max/clamp): on this codebase depth 4 sanitises in ~80
+	 * ms, depth 5 in ~1 s, depth 6 in ~11 s, depth 7 times out at the
+	 * 15 s php max_execution_time. An editor with {{#css:...}} access
+	 * can pin a worker per request by submitting a depth-6 payload.
+	 *
+	 * Real wiki CSS does not approach this depth (selectors like
+	 * `:not(...)` are usually depth 1; complex math functions used in
+	 * production stay at depth 2-3), so cap the input pre-parse at a
+	 * value that leaves real CSS untouched and keeps the worst-case
+	 * sanitiser time bounded.
+	 */
+	private const MAX_PAREN_DEPTH = 5;
+
+	/**
+	 * Pre-parse depth bound on '(' nesting. Strings (single or double
+	 * quoted, with backslash escapes) are skipped so legitimate CSS that
+	 * places parens inside content strings is not falsely rejected.
+	 * Comments are not skipped: CSS comments containing five-plus
+	 * nested opens are not a real pattern and pre-parse depth is a
+	 * heuristic, not a parser.
+	 *
+	 * @return bool true if the depth limit was exceeded somewhere.
+	 */
+	private function exceedsMaxParenDepth( string $css ): bool {
+		$depth = 0;
+		$inStr = '';
+		$len = strlen( $css );
+		for ( $i = 0; $i < $len; $i++ ) {
+			$c = $css[$i];
+			if ( $inStr !== '' ) {
+				if ( $c === '\\' ) {
+					$i++;
+					continue;
+				}
+				if ( $c === $inStr ) {
+					$inStr = '';
+				}
+				continue;
+			}
+			if ( $c === '"' || $c === "'" ) {
+				$inStr = $c;
+				continue;
+			}
+			if ( $c === '(' ) {
+				if ( ++$depth > self::MAX_PAREN_DEPTH ) {
+					return true;
+				}
+			} elseif ( $c === ')' && $depth > 0 ) {
+				$depth--;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Sanitize the provided css
 	 */
 	private function sanitizeCSS( string $css ): string {
@@ -93,6 +151,10 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 		// so could help avoid an amplification DoS (T368594#10146978). This can be revisited though.
 		// This also fails silently rather than loudly, supposedly partly for consistency with the former
 		// implementation, but actually mainly due to laziness. This can also be revisited.
+
+		if ( $this->exceedsMaxParenDepth( $css ) ) {
+			return '/* css-sanitizer rejected: CSS function nesting too deep */';
+		}
 
 		$cssParser = CSSParser::newFromString( $css );
 		$css = $cssParser->parseStylesheet();
@@ -168,10 +230,20 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 			# try to canonicalise the path (which requires replicating
 			# browser URL parsing exactly), restrict the input to a tight
 			# allowlist of characters that legitimate static-CSS paths
-			# need, and refuse "..". The expand()+str_starts_with() prefix
-			# check is kept as a second line of defence.
+			# need, and refuse:
+			#   - ".." anywhere (path traversal),
+			#   - "//" anywhere (a defanged but ugly protocol-relative
+			#     look-alike that the $base prepend currently neutralises,
+			#     but only by accident of $base being non-empty),
+			#   - any path segment starting with "." (.git, .env,
+			#     .htaccess, ./ no-op segments) -- there is no legitimate
+			#     static-CSS path that requires a dotfile.
+			# The expand()+str_starts_with() prefix check is kept as a
+			# second line of defence.
 			$isSafePath = preg_match( '#^/[A-Za-z0-9._/-]+$#', $css )
-				&& !str_contains( $css, '..' );
+				&& !str_contains( $css, '..' )
+				&& !str_contains( $css, '//' )
+				&& !preg_match( '#(^|/)\.#', $css );
 
 			if ( !$isSafePath ) {
 				$headItem .= '<!-- Invalid/malicious path  -->';
@@ -196,7 +268,11 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 			# strict CSPs; an inline <style> is what wiki templates that
 			# interpolate page variables (e.g. Template:Header's per-page
 			# site-notice hide rule) actually need.
-			$headItem .= Html::inlineStyle( $css, 'all', [ 'type' => 'text/css' ] );
+			#
+			# `type="text/css"` is HTML5-default and MediaWiki strips it
+			# from the <style> tag in 1.43+, so passing it as an attribute
+			# is a no-op and breaks tests that expect it on the wire.
+			$headItem .= Html::inlineStyle( $css );
 		}
 
 		$headItem .= '<!-- End Extension:CSS -->';
