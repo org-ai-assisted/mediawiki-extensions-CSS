@@ -372,4 +372,69 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 
 		$this->assertSame( $original, $text );
 	}
+
+	/**
+	 * @dataProvider provideDeeplyNestedCss
+	 */
+	public function testSanitizerRejectsDeeplyNestedFunctions( string $css ) {
+		// Each input nests CSS math functions deeper than MAX_PAREN_DEPTH
+		// (currently 5). The vendored wikimedia/css-sanitizer property-
+		// value matcher is super-exponential in nesting depth -- depth 6
+		// takes ~11 seconds, depth 7 hits php max_execution_time --
+		// so the pre-parse depth check must catch these before the
+		// sanitizer sees them, leaving no observable wall-clock spike.
+		$head = $this->captureHeadItem( $this->newInstance(), $css );
+
+		$this->assertStringContainsString(
+			'/* css-sanitizer rejected: CSS function nesting too deep */',
+			$head
+		);
+	}
+
+	public static function provideDeeplyNestedCss(): array {
+		// Depth 6 pure-calc bomb (the original DoS payload).
+		$d6 = str_repeat( 'calc(', 6 ) . '1px' . str_repeat( ')', 6 );
+		// Depth 7 mixed-function nesting -- different functions at each
+		// level so a naive "consecutive same-function" check would miss it.
+		$d7mixed = 'calc(min(max(clamp(round(min(max(1px, 2px), 3px), 4px), 5px, 6px), 7px), 8px))';
+		// Depth 10 pure-calc -- well beyond the cap.
+		$d10 = str_repeat( 'calc(', 10 ) . '1px' . str_repeat( ')', 10 );
+
+		return [
+			'depth-6 pure calc bomb' => [ "body { width: $d6; }" ],
+			'depth-7 mixed math'     => [ "body { width: $d7mixed; }" ],
+			'depth-10 pure calc'     => [ "body { width: $d10; }" ],
+		];
+	}
+
+	public function testSanitizerAcceptsMaxLegitimateNesting() {
+		// Depth 4 mixed-function math: the deepest shape a realistic
+		// stylesheet might produce (e.g. `calc(min(max(clamp(...))))`).
+		// Must NOT be falsely rejected by the depth cap, and must come
+		// out the other side as an inline <style>.
+		$css = 'body { width: calc(min(max(clamp(1px, 2px, 3px), 4px), 5px) + 6px); }';
+
+		$head = $this->captureHeadItem( $this->newInstance(), $css );
+
+		$this->assertStringContainsString( '<style>', $head );
+		$this->assertStringNotContainsString(
+			'CSS function nesting too deep',
+			$head
+		);
+	}
+
+	public function testSanitizerDepthCheckIgnoresStringContent() {
+		// CSS strings can legitimately contain '(' characters; the depth
+		// counter must skip string content so e.g. content: "((((((((("
+		// is not rejected.
+		$css = 'body { content: "((((((((((((((((((((((((((((((((("; }';
+
+		$head = $this->captureHeadItem( $this->newInstance(), $css );
+
+		$this->assertStringContainsString( '<style>', $head );
+		$this->assertStringNotContainsString(
+			'CSS function nesting too deep',
+			$head
+		);
+	}
 }
