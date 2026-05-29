@@ -203,8 +203,36 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 		$this->assertStringContainsString( '<!-- Begin Extension:CSS -->', $head );
 		$this->assertStringContainsString( '<link rel="stylesheet"', $head );
 		$this->assertStringContainsString( 'action=raw', $head );
+		// Browsers must see the resource as text/css; without ctype, MW
+		// would serve action=raw as text/plain and the browser would
+		// refuse to apply it under X-Content-Type-Options: nosniff.
+		$this->assertStringContainsString( 'ctype=text%2Fcss', $head );
 		$this->assertStringContainsString( 'css-extension=1', $head );
 		$this->assertStringContainsString( '<!-- End Extension:CSS -->', $head );
+	}
+
+	public function testCssRenderArticleInWhitelistedNamespaceWithNullConfigRefuses() {
+		// Distinct from testCssRenderArticleInNonWhitelistedNamespaceRefuses:
+		// that test sets the whitelist to a non-empty array and probes a
+		// namespace not on it; this one verifies that an UNCONFIGURED
+		// whitelist (null) -- the extension.json default -- still refuses
+		// rather than degrading to "allow everything". The current code
+		// achieves this with `?? []`, but explicit coverage prevents a
+		// future null-special-case from going unnoticed.
+		$this->overrideConfigValue( 'CssRawWhitelistedNamespaceIds', null );
+		$this->insertPage(
+			Title::makeTitle( NS_MEDIAWIKI, 'CssExtForkNullConfig.css' ),
+			'.foo { color: red; }'
+		);
+
+		$head = $this->captureHeadItem(
+			$this->newInstance(),
+			'MediaWiki:CssExtForkNullConfig.css'
+		);
+
+		$this->assertStringContainsString( 'Extension:CSS Error in', $head );
+		$this->assertStringContainsString( 'Only namespaces []', $head );
+		$this->assertStringNotContainsString( '<link', $head );
 	}
 
 	public function testCssRenderArticleInNonWhitelistedNamespaceRefuses() {
