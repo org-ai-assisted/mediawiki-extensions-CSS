@@ -168,10 +168,20 @@ class Hooks implements ParserFirstCallInitHook, RawPageViewBeforeOutputHook {
 			# try to canonicalise the path (which requires replicating
 			# browser URL parsing exactly), restrict the input to a tight
 			# allowlist of characters that legitimate static-CSS paths
-			# need, and refuse "..". The expand()+str_starts_with() prefix
-			# check is kept as a second line of defence.
+			# need, and refuse:
+			#   - ".." anywhere (path traversal),
+			#   - "//" anywhere (a defanged but ugly protocol-relative
+			#     look-alike that the $base prepend currently neutralises,
+			#     but only by accident of $base being non-empty),
+			#   - any path segment starting with "." (.git, .env,
+			#     .htaccess, ./ no-op segments) -- there is no legitimate
+			#     static-CSS path that requires a dotfile.
+			# The expand()+str_starts_with() prefix check is kept as a
+			# second line of defence.
 			$isSafePath = preg_match( '#^/[A-Za-z0-9._/-]+$#', $css )
-				&& !str_contains( $css, '..' );
+				&& !str_contains( $css, '..' )
+				&& !str_contains( $css, '//' )
+				&& !preg_match( '#(^|/)\.#', $css );
 
 			if ( !$isSafePath ) {
 				$headItem .= '<!-- Invalid/malicious path  -->';

@@ -96,6 +96,46 @@ class HooksTest extends MediaWikiIntegrationTestCase {
 				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
 				'/skins/style..css',
 			],
+			// "//" anywhere in the path is refused. With a non-empty
+			// $base the resulting href is not protocol-relative, but the
+			// guard is here so a future empty-$base configuration error
+			// cannot accidentally produce a //evil.example/x.css <link>.
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'//evil.example/x.css',
+			],
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'/skins//bar.css',
+			],
+			// Any path segment starting with "." is refused: .git,
+			// .env, .htaccess, ./no-op segments, leading-dot filenames.
+			// No legitimate static-CSS path needs a dotfile.
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'/.git/HEAD',
+			],
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'/legit/.env',
+			],
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'/legit/./style.css',
+			],
+			[
+				'<!-- Begin Extension:CSS --><!-- Invalid/malicious path  --><!-- End Extension:CSS -->',
+				'/.htaccess',
+			],
+			// Positive: interior dots (multi-dot extensions, dotted
+			// directory names) remain valid; only segment-leading dots
+			// are refused.
+			[
+				'<!-- Begin Extension:CSS --><link rel="stylesheet" ' .
+				'href="/skins/skins/path/to/foo_bar-1.0.min.css?css-extension=1">' .
+				'<!-- End Extension:CSS -->',
+				'/skins/path/to/foo_bar-1.0.min.css',
+			],
 			// Positive: hyphens and multi-dot extensions still work.
 			[
 				'<!-- Begin Extension:CSS --><link rel="stylesheet" ' .
